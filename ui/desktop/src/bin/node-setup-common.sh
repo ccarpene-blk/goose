@@ -137,7 +137,7 @@ if [ -n "${GOOSE_NPM_REGISTRY:-}" ] && curl -s --head --fail "${GOOSE_NPM_REGIST
 
 else
     log "GOOSE_NPM_REGISTRY is either not set or not accessible. Falling back to default npm registry."
-    export NPM_CONFIG_REGISTRY="https://registry.npmjs.org/"
+    export NPM_CONFIG_REGISTRY="https://global.block-artifacts.com/artifactory/api/npm/square-npm/"
 fi
 
 log "Node setup (common) completed successfully."

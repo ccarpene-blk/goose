@@ -179,11 +179,39 @@ impl Agent {
     ) -> Result<MessageStream, ProviderError> {
         let config = provider.get_model_config();
 
+        // Filter messages to only include those visible to the agent
+        // This excludes ActionRequired messages and other user-only messages
+        let agent_visible_messages: Vec<Message> = messages
+            .iter()
+            .filter(|m| m.is_agent_visible())
+            .cloned()
+            .collect();
+
+        tracing::debug!(
+            total_messages = messages.len(),
+            agent_visible_count = agent_visible_messages.len(),
+            filtered_out = messages.len() - agent_visible_messages.len(),
+            "Filtering messages for provider"
+        );
+
         // Convert tool messages to text if toolshim is enabled
         let messages_for_provider = if config.toolshim {
-            convert_tool_messages_to_text(messages)
+            convert_tool_messages_to_text(&agent_visible_messages)
         } else {
-            Conversation::new_unvalidated(messages.to_vec())
+            // Use new() to validate conversation structure, fallback to new_unvalidated if validation fails
+            match Conversation::new(agent_visible_messages.clone()) {
+                Ok(conv) => {
+                    tracing::debug!("Conversation validation passed");
+                    conv
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Conversation validation failed, using unvalidated conversation"
+                    );
+                    Conversation::new_unvalidated(agent_visible_messages)
+                }
+            }
         };
 
         // Clone owned data to move into the async stream

@@ -890,6 +890,7 @@ impl GooseAcpAgent {
             schedule_id: None,
             max_turns: None,
             retry_config: None,
+            flush_tool_responses: None,
         };
 
         let mut stream = self

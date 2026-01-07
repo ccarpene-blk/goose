@@ -3,7 +3,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use async_stream::try_stream;
-use futures::stream::{self, BoxStream};
+use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -54,6 +54,7 @@ impl Agent {
         tool_requests: &'a [ToolRequest],
         tool_futures: Arc<Mutex<Vec<(String, ToolStream)>>>,
         request_to_response_map: &'a HashMap<String, Arc<Mutex<Message>>>,
+        approved_request_ids: Arc<Mutex<std::collections::HashSet<String>>>,
         cancellation_token: Option<CancellationToken>,
         session: &'a Session,
         inspection_results: &'a [crate::tool_inspection::InspectionResult],
@@ -96,19 +97,49 @@ impl Agent {
                         }
 
                         if confirmation.permission == Permission::AllowOnce || confirmation.permission == Permission::AlwaysAllow {
-                            let (req_id, tool_result) = self.dispatch_tool_call(tool_call.clone(), request.id.clone(), cancellation_token.clone(), session).await;
-                            let mut futures = tool_futures.lock().await;
+                            tracing::debug!(
+                                request_id = %request.id,
+                                tool_name = %tool_call.name,
+                                "Approval granted - adding tool to futures for async execution"
+                            );
 
-                            futures.push((req_id, match tool_result {
-                                Ok(result) => tool_stream(
-                                    result.notification_stream.unwrap_or_else(|| Box::new(stream::empty())),
-                                    result.result,
-                                ),
-                                Err(e) => tool_stream(
-                                    Box::new(stream::empty()),
-                                    futures::future::ready(Err(e)),
-                                ),
-                            }));
+                            // Track this request as approved so we don't yield its pre-created message later
+                            approved_request_ids.lock().await.insert(request.id.clone());
+
+                            // Create the tool future and add it to the shared tool_futures collection
+                            // This allows it to be processed asynchronously after the approval stream completes
+                            let (req_id, tool_result) = self.dispatch_tool_call(
+                                tool_call.clone(),
+                                request.id.clone(),
+                                cancellation_token.clone(),
+                                session
+                            ).await;
+
+                            tracing::debug!(
+                                request_id = %req_id,
+                                original_request_id = %request.id,
+                                "Tool dispatched, adding to futures collection"
+                            );
+
+                            // Add the tool future to be processed after approval completes
+                            tool_futures.lock().await.push((
+                                req_id.clone(),
+                                match tool_result {
+                                    Ok(result) => {
+                                        let stream = result.notification_stream
+                                            .unwrap_or_else(|| Box::new(futures::stream::empty()));
+                                        tool_stream(stream, result.result)
+                                    }
+                                    Err(e) => {
+                                        tool_stream(Box::new(futures::stream::empty()), futures::future::ready(Err(e)))
+                                    }
+                                },
+                            ));
+
+                            tracing::debug!(
+                                request_id = %req_id,
+                                "Tool future added to collection"
+                            );
 
                             // Update the shared permission manager when user selects "Always Allow"
                             if confirmation.permission == Permission::AlwaysAllow {

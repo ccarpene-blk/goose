@@ -6,6 +6,7 @@ import { ConversationLimitsDropdown } from './ConversationLimitsDropdown';
 export const ModeSection = () => {
   const [currentMode, setCurrentMode] = useState('auto');
   const [maxTurns, setMaxTurns] = useState<number>(1000);
+  const [flushToolResponses, setFlushToolResponses] = useState<boolean>(false);
   const { read, upsert } = useConfig();
 
   const handleModeChange = async (newMode: string) => {
@@ -40,6 +41,17 @@ export const ModeSection = () => {
     }
   }, [read]);
 
+  const fetchFlushToolResponses = useCallback(async () => {
+    try {
+      const flush = (await read('GOOSE_FLUSH_TOOL_RESPONSES', false)) as boolean;
+      if (flush !== undefined && flush !== null) {
+        setFlushToolResponses(flush);
+      }
+    } catch (error) {
+      console.error('Error fetching flush tool responses setting:', error);
+    }
+  }, [read]);
+
   const handleMaxTurnsChange = async (value: number) => {
     try {
       await upsert('GOOSE_MAX_TURNS', value, false);
@@ -49,10 +61,20 @@ export const ModeSection = () => {
     }
   };
 
+  const handleFlushToolResponsesChange = async (value: boolean) => {
+    try {
+      await upsert('GOOSE_FLUSH_TOOL_RESPONSES', value, false);
+      setFlushToolResponses(value);
+    } catch (error) {
+      console.error('Error updating flush tool responses:', error);
+    }
+  };
+
   useEffect(() => {
     fetchCurrentMode();
     fetchMaxTurns();
-  }, [fetchCurrentMode, fetchMaxTurns]);
+    fetchFlushToolResponses();
+  }, [fetchCurrentMode, fetchMaxTurns, fetchFlushToolResponses]);
 
   return (
     <div className="space-y-1">
@@ -68,8 +90,13 @@ export const ModeSection = () => {
         />
       ))}
 
-      {/* Conversation Limits Dropdown */}
-      <ConversationLimitsDropdown maxTurns={maxTurns} onMaxTurnsChange={handleMaxTurnsChange} />
+      {/* Conversation Limits & Security Dropdown */}
+      <ConversationLimitsDropdown
+        maxTurns={maxTurns}
+        onMaxTurnsChange={handleMaxTurnsChange}
+        flushToolResponses={flushToolResponses}
+        onFlushToolResponsesChange={handleFlushToolResponsesChange}
+      />
     </div>
   );
 };

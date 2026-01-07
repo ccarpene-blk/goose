@@ -92,4 +92,8 @@ pub struct SessionConfig {
     /// Retry configuration for automated validation and recovery
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_config: Option<RetryConfig>,
+    /// Whether to flush tool responses from context between user turns
+    /// This provides additional protection against prompt injection attacks
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flush_tool_responses: Option<bool>,
 }

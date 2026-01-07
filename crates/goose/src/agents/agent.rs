@@ -31,7 +31,7 @@ use crate::context_mgmt::{
 };
 use crate::conversation::message::{
     ActionRequiredData, Message, MessageContent, ProviderMetadata, SystemNotificationType,
-    ToolRequest,
+    ToolRequest, ToolResponse,
 };
 use crate::conversation::{debug_conversation_fix, fix_conversation, Conversation};
 use crate::mcp_utils::ToolResult;
@@ -60,6 +60,52 @@ use tracing::{debug, error, info, instrument, warn};
 
 const DEFAULT_MAX_TURNS: u32 = 1000;
 const COMPACTION_THINKING_TEXT: &str = "goose is compacting the conversation...";
+
+/// Tracks the tool-call window state for origin validation
+#[derive(Clone, Debug)]
+pub struct ToolCallWindowState {
+    /// Are we currently in a tool-call window?
+    /// (after executing tools but before receiving new user input)
+    pub in_window: bool,
+
+    /// Tools that were invoked in the current user interaction
+    pub tools_invoked_this_turn: Vec<String>,
+
+    /// Timestamp of last user message (for logging/debugging)
+    pub last_user_message_time: Option<std::time::Instant>,
+}
+
+impl ToolCallWindowState {
+    pub fn new() -> Self {
+        Self {
+            in_window: false,
+            tools_invoked_this_turn: Vec::new(),
+            last_user_message_time: None,
+        }
+    }
+
+    pub fn reset_for_user_turn(&mut self) {
+        self.in_window = false;
+        self.tools_invoked_this_turn.clear();
+        self.last_user_message_time = Some(std::time::Instant::now());
+    }
+
+    pub fn enter_tool_call_window(&mut self) {
+        self.in_window = true;
+    }
+
+    pub fn add_invoked_tool(&mut self, tool_name: String) {
+        if !self.tools_invoked_this_turn.contains(&tool_name) {
+            self.tools_invoked_this_turn.push(tool_name);
+        }
+    }
+}
+
+impl Default for ToolCallWindowState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Context needed for the reply function
 pub struct ReplyContext {
@@ -103,6 +149,9 @@ pub struct Agent {
     pub(super) scheduler_service: Mutex<Option<Arc<dyn SchedulerTrait>>>,
     pub(super) retry_manager: RetryManager,
     pub(super) tool_inspection_manager: ToolInspectionManager,
+
+    /// Tracks whether we're in a tool-call window for origin validation
+    pub(super) tool_call_window: Arc<Mutex<ToolCallWindowState>>,
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +210,9 @@ impl Agent {
         let (tool_tx, tool_rx) = mpsc::channel(32);
         let provider = Arc::new(Mutex::new(None));
 
+        // Create tool-call window state for origin validation
+        let tool_call_window = Arc::new(Mutex::new(ToolCallWindowState::new()));
+
         Self {
             provider: provider.clone(),
             extension_manager: Arc::new(ExtensionManager::new(provider.clone())),
@@ -175,16 +227,26 @@ impl Agent {
             tool_result_rx: Arc::new(Mutex::new(tool_rx)),
             scheduler_service: Mutex::new(None),
             retry_manager: RetryManager::new(),
-            tool_inspection_manager: Self::create_default_tool_inspection_manager(),
+            tool_inspection_manager: Self::create_default_tool_inspection_manager(
+                tool_call_window.clone(),
+            ),
+            tool_call_window,
         }
     }
 
     /// Create a tool inspection manager with default inspectors
-    fn create_default_tool_inspection_manager() -> ToolInspectionManager {
+    fn create_default_tool_inspection_manager(
+        tool_call_window: Arc<Mutex<ToolCallWindowState>>,
+    ) -> ToolInspectionManager {
         let mut tool_inspection_manager = ToolInspectionManager::new();
 
         // Add security inspector (highest priority - runs first)
         tool_inspection_manager.add_inspector(Box::new(SecurityInspector::new()));
+
+        // Add origin inspector (high priority - after security, before permission)
+        tool_inspection_manager.add_inspector(Box::new(
+            crate::security::origin_inspector::OriginInspector::new(tool_call_window),
+        ));
 
         // Add permission inspector (medium-high priority)
         // Note: mode will be updated dynamically based on session config
@@ -440,6 +502,17 @@ impl Agent {
                     "Subagents cannot create other subagents".to_string(),
                     None,
                 )),
+            );
+        }
+
+        // Track this tool invocation for origin validation
+        {
+            let mut window_state = self.tool_call_window.lock().await;
+            window_state.add_invoked_tool(tool_call.name.to_string());
+            tracing::debug!(
+                tool_name = %tool_call.name,
+                tools_invoked = ?window_state.tools_invoked_this_turn,
+                "Tracking tool invocation"
             );
         }
 
@@ -891,6 +964,13 @@ impl Agent {
                 SessionManager::add_message(&session_config.id, &user_message).await?;
             }
         }
+        // Reset tool-call window state for new user turn
+        {
+            let mut window_state = self.tool_call_window.lock().await;
+            window_state.reset_for_user_turn();
+            tracing::debug!("Reset tool-call window state for new user turn");
+        }
+
         let session = SessionManager::get_session(&session_config.id, true).await?;
         let conversation = session
             .conversation
@@ -1101,17 +1181,31 @@ impl Agent {
                                 }
 
                                 let tool_response_messages: Vec<Arc<Mutex<Message>>> = (0..num_tool_requests)
-                                    .map(|_| Arc::new(Mutex::new(Message::user().with_id(
-                                        format!("msg_{}", Uuid::new_v4())
-                                    ))))
+                                    .map(|_| {
+                                        let msg_id = format!("msg_{}", Uuid::new_v4());
+                                        tracing::debug!(
+                                            message_id = %msg_id,
+                                            "Creating pre-allocated tool response message"
+                                        );
+                                        Arc::new(Mutex::new(Message::user().with_id(msg_id)))
+                                    })
                                     .collect();
 
                                 let mut request_to_response_map = HashMap::new();
                                 let mut request_metadata: HashMap<String, Option<ProviderMetadata>> = HashMap::new();
                                 for (idx, request) in frontend_requests.iter().chain(remaining_requests.iter()).enumerate() {
+                                    tracing::debug!(
+                                        request_id = %request.id,
+                                        message_idx = idx,
+                                        "Mapping request to response message"
+                                    );
                                     request_to_response_map.insert(request.id.clone(), tool_response_messages[idx].clone());
                                     request_metadata.insert(request.id.clone(), request.metadata.clone());
                                 }
+
+                                // Track which tools were approved during the approval process
+                                // so we can skip yielding their pre-created messages later
+                                let approved_request_ids = Arc::new(Mutex::new(std::collections::HashSet::new()));
 
                                 for (idx, request) in frontend_requests.iter().enumerate() {
                                     let mut frontend_tool_stream = self.handle_frontend_tool_request(
@@ -1187,6 +1281,7 @@ impl Agent {
                                         &permission_check_result.needs_approval,
                                         tool_futures_arc.clone(),
                                         &request_to_response_map,
+                                        approved_request_ids.clone(),
                                         cancel_token.clone(),
                                         &session,
                                         &inspection_results,
@@ -1228,9 +1323,37 @@ impl Agent {
                                                     all_install_successful = false;
                                                 }
                                                 if let Some(response_msg) = request_to_response_map.get(&request_id) {
-                                                    let metadata = request_metadata.get(&request_id).and_then(|m| m.as_ref());
                                                     let mut response = response_msg.lock().await;
-                                                    *response = response.clone().with_tool_response_with_metadata(request_id, output, metadata);
+                                                    let old_content_len = response.content.len();
+
+                                                    if old_content_len > 0 {
+                                                        tracing::warn!(
+                                                            request_id = %request_id,
+                                                            old_content_len = old_content_len,
+                                                            "PRE-ALLOCATED MESSAGE ALREADY HAS CONTENT BEFORE FUTURE UPDATE! Clearing..."
+                                                        );
+                                                        // Clear existing content to prevent duplication
+                                                        *response = Message::user().with_id(response.id.clone().unwrap_or_else(|| format!("msg_{}", uuid::Uuid::new_v4())));
+                                                    }
+
+                                                    tracing::debug!(
+                                                        request_id = %request_id,
+                                                        result_is_ok = output.is_ok(),
+                                                        "Updating pre-allocated message with tool result"
+                                                    );
+                                                    let metadata = request_metadata.get(&request_id).and_then(|m| m.as_ref());
+                                                    *response = response.clone().with_tool_response_with_metadata(request_id.clone(), output, metadata);
+                                                    tracing::debug!(
+                                                        request_id = %request_id,
+                                                        old_content_len = old_content_len,
+                                                        new_content_len = response.content.len(),
+                                                        "Message updated with tool result"
+                                                    );
+                                                } else {
+                                                    tracing::warn!(
+                                                        request_id = %request_id,
+                                                        "Tool result received but no pre-allocated message found in map"
+                                                    );
                                                 }
                                             }
                                             ToolStreamItem::Message(msg) => {
@@ -1267,8 +1390,30 @@ impl Agent {
                                     messages_to_add.push(thinking_msg);
                                 }
 
+                                // Track which messages we've already yielded to detect duplicates
+                                let mut yielded_request_ids = std::collections::HashSet::new();
+
                                 for (idx, request) in frontend_requests.iter().chain(remaining_requests.iter()).enumerate() {
                                     if request.tool_call.is_ok() {
+                                        // Detect if we're processing the same request twice
+                                        if !yielded_request_ids.insert(request.id.clone()) {
+                                            tracing::error!(
+                                                request_id = %request.id,
+                                                idx = idx,
+                                                "DUPLICATE REQUEST IN LOOP - same request_id processed twice!"
+                                            );
+                                            continue;
+                                        }
+
+                                        let was_approved = approved_request_ids.lock().await.contains(&request.id);
+
+                                        tracing::debug!(
+                                            request_id = %request.id,
+                                            idx = idx,
+                                            was_approved = was_approved,
+                                            "Adding tool request/response pair to messages"
+                                        );
+
                                         let request_msg = Message::assistant()
                                             .with_id(format!("msg_{}", Uuid::new_v4()))
                                             .with_tool_request_with_metadata(
@@ -1277,11 +1422,60 @@ impl Agent {
                                                 request.metadata.as_ref(),
                                                 request.tool_meta.clone(),
                                             );
+
+                                        // Always use request_to_response_map to get the correct message
+                                        // Using tool_response_messages[idx] can fail when tools are reordered
+                                        let final_response = if let Some(response_msg) = request_to_response_map.get(&request.id) {
+                                            response_msg.lock().await.clone()
+                                        } else {
+                                            tracing::error!(
+                                                request_id = %request.id,
+                                                "No response message found in map for request!"
+                                            );
+                                            continue;
+                                        };
+
+                                        tracing::debug!(
+                                            request_id = %request.id,
+                                            message_content_len = final_response.content.len(),
+                                            "Response message has {} content items", final_response.content.len()
+                                        );
+
+                                        tracing::debug!(
+                                            request_id = %request.id,
+                                            request_agent_visible = request_msg.is_agent_visible(),
+                                            response_agent_visible = final_response.is_agent_visible(),
+                                            response_has_content = !final_response.content.is_empty(),
+                                            response_content_items = final_response.content.len(),
+                                            "Tool message metadata check"
+                                        );
+
+                                        // Check for tool_call_id in response
+                                        for content in &final_response.content {
+                                            if let MessageContent::ToolResponse(tr) = content {
+                                                let is_error = tr.tool_result.as_ref().ok().and_then(|r| r.is_error);
+                                                tracing::debug!(
+                                                    request_id = %request.id,
+                                                    tool_call_id = %tr.id,
+                                                    is_error = ?is_error,
+                                                    "Yielding tool response message"
+                                                );
+                                            }
+                                        }
+
+                                        tracing::debug!(
+                                            request_id = %request.id,
+                                            "Adding request and response to messages_to_add"
+                                        );
                                         messages_to_add.push(request_msg);
-                                        let final_response = tool_response_messages[idx]
-                                                                .lock().await.clone();
                                         yield AgentEvent::Message(final_response.clone());
-                                        messages_to_add.push(final_response);
+                                        messages_to_add.push(final_response.clone());
+
+                                        tracing::debug!(
+                                            request_id = %request.id,
+                                            messages_to_add_len = messages_to_add.len(),
+                                            "Messages added, current messages_to_add length"
+                                        );
                                     }
                                 }
 
@@ -1386,10 +1580,36 @@ impl Agent {
                     }
                 }
 
+                tracing::debug!(
+                    messages_to_add_count = messages_to_add.len(),
+                    conversation_len_before = conversation.len(),
+                    "About to extend conversation with messages_to_add"
+                );
                 for msg in &messages_to_add {
                     SessionManager::add_message(&session_config.id, msg).await?;
                 }
                 conversation.extend(messages_to_add);
+                tracing::debug!(
+                    conversation_len_after = conversation.len(),
+                    "Conversation extended"
+                );
+
+                // Flush tool responses after LLM has consumed them to prevent content injection
+                // in subsequent turns. The LLM sees the tool response once (above), then we remove
+                // it from context so malicious content doesn't persist across turns.
+                self.flush_tool_responses_if_enabled(&mut conversation, &session_config)
+                    .await?;
+
+                // Enter tool-call window after executing tools
+                if !no_tools_called {
+                    let mut window_state = self.tool_call_window.lock().await;
+                    window_state.enter_tool_call_window();
+                    tracing::debug!(
+                        tools_invoked = ?window_state.tools_invoked_this_turn,
+                        "Entered tool-call window after tool execution"
+                    );
+                }
+
                 if exit_chat {
                     break;
                 }
@@ -1402,6 +1622,87 @@ impl Agent {
     pub async fn extend_system_prompt(&self, instruction: String) {
         let mut prompt_manager = self.prompt_manager.lock().await;
         prompt_manager.add_system_prompt_extra(instruction);
+    }
+
+    /// Flush tool responses from conversation if configured
+    /// This keeps the tool request/response structure so the LLM knows what actions were taken,
+    /// but replaces response content with a placeholder to prevent prompt injection
+    async fn flush_tool_responses_if_enabled(
+        &self,
+        conversation: &mut Conversation,
+        config: &SessionConfig,
+    ) -> Result<()> {
+        let should_flush = config.flush_tool_responses.unwrap_or(false);
+
+        if !should_flush {
+            return Ok(());
+        }
+
+        tracing::info!("Flushing tool response content from conversation for security");
+    // CarpeneNote: I don't think this is right - why does the assistant's context need to be preserved if we're flushing tool output?
+        // Seems like it could be abused still
+        // Keep all messages but sanitize tool response content
+        let flushed_messages: Vec<Message> = conversation
+            .messages()
+            .iter()
+            .map(|msg| {
+                match msg.role {
+                    rmcp::model::Role::Assistant => {
+                        // Keep assistant messages and tool requests as-is
+                        msg.clone()
+                    }
+                    rmcp::model::Role::User => {
+                        // Keep user messages but replace tool response content with placeholder
+                        let sanitized_content: Vec<MessageContent> = msg
+                            .content
+                            .iter()
+                            .map(|c| {
+                                if let MessageContent::ToolResponse(tr) = c {
+                                    // Keep the structure but replace content with placeholder
+                                    let placeholder_result = match &tr.tool_result {
+                                        Ok(original) => {
+                                            // Preserve error status but hide content
+                                            Ok(rmcp::model::CallToolResult {
+                                                content: vec![Content::text("[Tool output redacted for security. Request a re-run of the tool-call if required]")],
+                                                structured_content: None,
+                                                is_error: original.is_error,
+                                                meta: None,
+                                            })
+                                        }
+                                        Err(e) => {
+                                            // Keep errors visible so LLM can handle them
+                                            Err(e.clone())
+                                        }
+                                    };
+                                    MessageContent::ToolResponse(ToolResponse {
+                                        id: tr.id.clone(),
+                                        tool_result: placeholder_result,
+                                        metadata: tr.metadata.clone(),
+                                    })
+                                } else {
+                                    c.clone()
+                                }
+                            })
+                            .collect();
+
+                        let mut new_msg = msg.clone();
+                        new_msg.content = sanitized_content;
+                        new_msg
+                    }
+                }
+            })
+            .collect();
+
+        // Replace conversation messages
+        *conversation = Conversation::new_unvalidated(flushed_messages);
+
+        tracing::info!(
+            counter.goose.tool_responses_flushed = 1,
+            message_count = conversation.messages().len(),
+            "Tool responses flushed from conversation"
+        );
+
+        Ok(())
     }
 
     pub async fn update_provider(

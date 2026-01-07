@@ -9,6 +9,7 @@ use axum::{
 use bytes::Bytes;
 use futures::{stream::StreamExt, Stream};
 use goose::agents::{AgentEvent, SessionConfig};
+use goose::config::Config;
 use goose::conversation::message::{Message, MessageContent, TokenState};
 use goose::conversation::Conversation;
 use goose::session::SessionManager;
@@ -276,11 +277,18 @@ pub async fn reply(
 
         std::env::set_var("GOOSE_WORKING_DIR", &session.working_dir);
 
+        // Read flush_tool_responses from configuration
+        let config = Config::global();
+        let flush_tool_responses = config
+            .get_param::<bool>("GOOSE_FLUSH_TOOL_RESPONSES")
+            .ok();
+
         let session_config = SessionConfig {
             id: session_id.clone(),
             schedule_id: session.schedule_id.clone(),
             max_turns: None,
             retry_config: None,
+            flush_tool_responses,
         };
 
         let mut all_messages = match conversation_so_far {

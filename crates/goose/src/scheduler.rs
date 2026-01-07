@@ -784,6 +784,7 @@ async fn execute_job(
         schedule_id: Some(job.id.clone()),
         max_turns: None,
         retry_config: None,
+        flush_tool_responses: None,
     };
 
     let session_id = session_config.id.clone();

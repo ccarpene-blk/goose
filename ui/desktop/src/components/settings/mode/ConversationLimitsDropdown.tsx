@@ -1,15 +1,20 @@
 import { useState } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { Input } from '../../ui/input';
+import { Switch } from '../../ui/switch';
 
 interface ConversationLimitsDropdownProps {
   maxTurns: number;
   onMaxTurnsChange: (value: number) => void;
+  flushToolResponses: boolean;
+  onFlushToolResponsesChange: (value: boolean) => void;
 }
 
 export const ConversationLimitsDropdown = ({
   maxTurns,
   onMaxTurnsChange,
+  flushToolResponses,
+  onFlushToolResponsesChange,
 }: ConversationLimitsDropdownProps) => {
   const [isExpanded, setIsExpanded] = useState(false);
 
@@ -23,7 +28,7 @@ export const ConversationLimitsDropdown = ({
         onClick={toggleExpanded}
         className="w-full flex items-center justify-between py-2 px-2 hover:bg-background-muted rounded-lg transition-all group"
       >
-        <h3 className="text-text-default">Conversation Limits</h3>
+        <h3 className="text-text-default">Conversation Limits & Security</h3>
 
         <ChevronDown
           className={`w-4 h-4 text-text-muted transition-transform duration-200 ease-in-out ${
@@ -52,6 +57,20 @@ export const ConversationLimitsDropdown = ({
               value={maxTurns}
               onChange={(e) => onMaxTurnsChange(Number(e.target.value))}
               className="w-20"
+            />
+          </div>
+
+          <div className="flex items-center justify-between py-2 px-2 bg-background-subtle rounded-lg transform transition-all duration-200 ease-in-out">
+            <div className="flex-1 pr-4">
+              <h4 className="text-text-default text-sm">Flush Tool Responses</h4>
+              <p className="text-xs text-text-muted mt-[2px]">
+                Remove tool requests and responses from conversation history between turns to prevent prompt injection attacks
+              </p>
+            </div>
+            <Switch
+              checked={flushToolResponses}
+              onCheckedChange={onFlushToolResponsesChange}
+              variant="mono"
             />
           </div>
         </div>
