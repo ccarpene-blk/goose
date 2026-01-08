@@ -7,6 +7,9 @@ export const ModeSection = () => {
   const [currentMode, setCurrentMode] = useState('auto');
   const [maxTurns, setMaxTurns] = useState<number>(1000);
   const [flushToolResponses, setFlushToolResponses] = useState<boolean>(false);
+  const [originValidationEnabled, setOriginValidationEnabled] = useState<boolean>(true);
+  const [originValidationRequireApproval, setOriginValidationRequireApproval] = useState<boolean>(true);
+  const [originValidationExemptedTools, setOriginValidationExemptedTools] = useState<string>('final_output,read,list,ls,glob,grep,get');
   const { read, upsert } = useConfig();
 
   const handleModeChange = async (newMode: string) => {
@@ -52,6 +55,39 @@ export const ModeSection = () => {
     }
   }, [read]);
 
+  const fetchOriginValidationEnabled = useCallback(async () => {
+    try {
+      const enabled = (await read('ORIGIN_VALIDATION_ENABLED', false)) as boolean;
+      if (enabled !== undefined && enabled !== null) {
+        setOriginValidationEnabled(enabled);
+      }
+    } catch (error) {
+      console.error('Error fetching origin validation enabled setting:', error);
+    }
+  }, [read]);
+
+  const fetchOriginValidationRequireApproval = useCallback(async () => {
+    try {
+      const requireApproval = (await read('ORIGIN_VALIDATION_REQUIRE_APPROVAL', false)) as boolean;
+      if (requireApproval !== undefined && requireApproval !== null) {
+        setOriginValidationRequireApproval(requireApproval);
+      }
+    } catch (error) {
+      console.error('Error fetching origin validation require approval setting:', error);
+    }
+  }, [read]);
+
+  const fetchOriginValidationExemptedTools = useCallback(async () => {
+    try {
+      const exemptedTools = (await read('ORIGIN_VALIDATION_EXEMPTED_TOOLS', false)) as string;
+      if (exemptedTools) {
+        setOriginValidationExemptedTools(exemptedTools);
+      }
+    } catch (error) {
+      console.error('Error fetching origin validation exempted tools setting:', error);
+    }
+  }, [read]);
+
   const handleMaxTurnsChange = async (value: number) => {
     try {
       await upsert('GOOSE_MAX_TURNS', value, false);
@@ -70,11 +106,41 @@ export const ModeSection = () => {
     }
   };
 
+  const handleOriginValidationEnabledChange = async (value: boolean) => {
+    try {
+      await upsert('ORIGIN_VALIDATION_ENABLED', value, false);
+      setOriginValidationEnabled(value);
+    } catch (error) {
+      console.error('Error updating origin validation enabled:', error);
+    }
+  };
+
+  const handleOriginValidationRequireApprovalChange = async (value: boolean) => {
+    try {
+      await upsert('ORIGIN_VALIDATION_REQUIRE_APPROVAL', value, false);
+      setOriginValidationRequireApproval(value);
+    } catch (error) {
+      console.error('Error updating origin validation require approval:', error);
+    }
+  };
+
+  const handleOriginValidationExemptedToolsChange = async (value: string) => {
+    try {
+      await upsert('ORIGIN_VALIDATION_EXEMPTED_TOOLS', value, false);
+      setOriginValidationExemptedTools(value);
+    } catch (error) {
+      console.error('Error updating origin validation exempted tools:', error);
+    }
+  };
+
   useEffect(() => {
     fetchCurrentMode();
     fetchMaxTurns();
     fetchFlushToolResponses();
-  }, [fetchCurrentMode, fetchMaxTurns, fetchFlushToolResponses]);
+    fetchOriginValidationEnabled();
+    fetchOriginValidationRequireApproval();
+    fetchOriginValidationExemptedTools();
+  }, [fetchCurrentMode, fetchMaxTurns, fetchFlushToolResponses, fetchOriginValidationEnabled, fetchOriginValidationRequireApproval, fetchOriginValidationExemptedTools]);
 
   return (
     <div className="space-y-1">
@@ -96,6 +162,12 @@ export const ModeSection = () => {
         onMaxTurnsChange={handleMaxTurnsChange}
         flushToolResponses={flushToolResponses}
         onFlushToolResponsesChange={handleFlushToolResponsesChange}
+        originValidationEnabled={originValidationEnabled}
+        onOriginValidationEnabledChange={handleOriginValidationEnabledChange}
+        originValidationRequireApproval={originValidationRequireApproval}
+        onOriginValidationRequireApprovalChange={handleOriginValidationRequireApprovalChange}
+        originValidationExemptedTools={originValidationExemptedTools}
+        onOriginValidationExemptedToolsChange={handleOriginValidationExemptedToolsChange}
       />
     </div>
   );

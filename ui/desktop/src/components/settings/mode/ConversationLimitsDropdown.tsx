@@ -8,6 +8,12 @@ interface ConversationLimitsDropdownProps {
   onMaxTurnsChange: (value: number) => void;
   flushToolResponses: boolean;
   onFlushToolResponsesChange: (value: boolean) => void;
+  originValidationEnabled: boolean;
+  onOriginValidationEnabledChange: (value: boolean) => void;
+  originValidationRequireApproval: boolean;
+  onOriginValidationRequireApprovalChange: (value: boolean) => void;
+  originValidationExemptedTools: string;
+  onOriginValidationExemptedToolsChange: (value: string) => void;
 }
 
 export const ConversationLimitsDropdown = ({
@@ -15,6 +21,12 @@ export const ConversationLimitsDropdown = ({
   onMaxTurnsChange,
   flushToolResponses,
   onFlushToolResponsesChange,
+  originValidationEnabled,
+  onOriginValidationEnabledChange,
+  originValidationRequireApproval,
+  onOriginValidationRequireApprovalChange,
+  originValidationExemptedTools,
+  onOriginValidationExemptedToolsChange,
 }: ConversationLimitsDropdownProps) => {
   const [isExpanded, setIsExpanded] = useState(false);
 
@@ -39,7 +51,7 @@ export const ConversationLimitsDropdown = ({
 
       <div
         className={`overflow-hidden transition-all duration-300 ease-in-out ${
-          isExpanded ? 'max-h-96 opacity-100 mt-2' : 'max-h-0 opacity-0 mt-0'
+          isExpanded ? 'max-h-[600px] opacity-100 mt-2' : 'max-h-0 opacity-0 mt-0'
         }`}
       >
         <div className="space-y-3 pb-2">
@@ -64,7 +76,7 @@ export const ConversationLimitsDropdown = ({
             <div className="flex-1 pr-4">
               <h4 className="text-text-default text-sm">Flush Tool Responses</h4>
               <p className="text-xs text-text-muted mt-[2px]">
-                Remove tool requests and responses from conversation history between turns to prevent prompt injection attacks
+                Remove tool response content from conversation history between user turns to prevent prompt injection attacks from persisting
               </p>
             </div>
             <Switch
@@ -73,6 +85,54 @@ export const ConversationLimitsDropdown = ({
               variant="mono"
             />
           </div>
+
+          <div className="flex items-center justify-between py-2 px-2 bg-background-subtle rounded-lg transform transition-all duration-200 ease-in-out">
+            <div className="flex-1 pr-4">
+              <h4 className="text-text-default text-sm">Origin Validation</h4>
+              <p className="text-xs text-text-muted mt-[2px]">
+                Detect and flag cross-origin tool calls that may indicate prompt injection attacks
+              </p>
+            </div>
+            <Switch
+              checked={originValidationEnabled}
+              onCheckedChange={onOriginValidationEnabledChange}
+              variant="mono"
+            />
+          </div>
+
+          {originValidationEnabled && (
+            <>
+              <div className="flex items-center justify-between py-2 px-2 bg-background-subtle rounded-lg transform transition-all duration-200 ease-in-out">
+                <div className="flex-1 pr-4">
+                  <h4 className="text-text-default text-sm">Require Approval for Cross-Origin Calls</h4>
+                  <p className="text-xs text-text-muted mt-[2px]">
+                    When enabled, cross-origin tool calls will require user approval before execution
+                  </p>
+                </div>
+                <Switch
+                  checked={originValidationRequireApproval}
+                  onCheckedChange={onOriginValidationRequireApprovalChange}
+                  variant="mono"
+                />
+              </div>
+
+              <div className="flex flex-col py-2 px-2 bg-background-subtle rounded-lg transform transition-all duration-200 ease-in-out">
+                <div className="mb-2">
+                  <h4 className="text-text-default text-sm">Exempted Tools</h4>
+                  <p className="text-xs text-text-muted mt-[2px]">
+                    Comma-separated list of tool names exempt from origin validation (e.g., read-only tools)
+                  </p>
+                </div>
+                <Input
+                  type="text"
+                  value={originValidationExemptedTools}
+                  onChange={(e) => onOriginValidationExemptedToolsChange(e.target.value)}
+                  placeholder="final_output,read,list,ls,glob,grep,get"
+                  className="w-full"
+                />
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

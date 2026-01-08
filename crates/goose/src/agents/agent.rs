@@ -1071,6 +1071,11 @@ impl Agent {
         let reply_span = tracing::Span::current();
         self.reset_retry_attempts().await;
 
+        // Flush tool responses at the start of a new user turn
+        // This removes tool responses from the previous turn before processing the new message
+        self.flush_tool_responses_if_enabled(&mut conversation, &session_config)
+            .await?;
+
         let provider = self.provider().await?;
         let session_id = session_config.id.clone();
         let working_dir = session.working_dir.clone();
@@ -1594,12 +1599,6 @@ impl Agent {
                     "Conversation extended"
                 );
 
-                // Flush tool responses after LLM has consumed them to prevent content injection
-                // in subsequent turns. The LLM sees the tool response once (above), then we remove
-                // it from context so malicious content doesn't persist across turns.
-                self.flush_tool_responses_if_enabled(&mut conversation, &session_config)
-                    .await?;
-
                 // Enter tool-call window after executing tools
                 if !no_tools_called {
                     let mut window_state = self.tool_call_window.lock().await;
@@ -1625,8 +1624,10 @@ impl Agent {
     }
 
     /// Flush tool responses from conversation if configured
+    /// Called at the start of each new user turn to remove tool responses from the previous turn.
     /// This keeps the tool request/response structure so the LLM knows what actions were taken,
-    /// but replaces response content with a placeholder to prevent prompt injection
+    /// but replaces response content with a placeholder to prevent prompt injection attacks
+    /// from persisting across user turns.
     async fn flush_tool_responses_if_enabled(
         &self,
         conversation: &mut Conversation,
@@ -1638,9 +1639,7 @@ impl Agent {
             return Ok(());
         }
 
-        tracing::info!("Flushing tool response content from conversation for security");
-    // CarpeneNote: I don't think this is right - why does the assistant's context need to be preserved if we're flushing tool output?
-        // Seems like it could be abused still
+        tracing::info!("Flushing tool response content from conversation at start of new user turn");
         // Keep all messages but sanitize tool response content
         let flushed_messages: Vec<Message> = conversation
             .messages()
