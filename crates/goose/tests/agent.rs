@@ -389,6 +389,7 @@ mod tests {
                 schedule_id: None,
                 max_turns: Some(1),
                 retry_config: None,
+                flush_tool_responses: None,
             };
 
             let reply_stream = agent.reply(user_message, session_config, None).await?;

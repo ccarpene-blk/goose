@@ -46,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
         schedule_id: None,
         max_turns: None,
         retry_config: None,
+        flush_tool_responses: None,
     };
 
     let user_message = Message::user()
