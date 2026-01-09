@@ -49,6 +49,8 @@ impl OriginInspectorConfig {
             .filter(|s| !s.is_empty())
             .collect();
 
+
+
         Self {
             enabled,
             require_approval,
@@ -105,7 +107,6 @@ impl ToolInspector for OriginInspector {
         _messages: &[Message],
     ) -> Result<Vec<InspectionResult>> {
         let state = self.tool_call_window_state.lock().await;
-
         if !state.in_window {
             // Not in tool-call window, all tools are considered same-origin
             tracing::debug!(
@@ -116,6 +117,9 @@ impl ToolInspector for OriginInspector {
         }
 
         let mut results = Vec::new();
+        // Do we need a denylist here as well as allowlist? leaving commented for now
+        //    let mut deny_list = HashSet::new();
+
 
         for request in tool_requests {
             if let Ok(tool_call) = &request.tool_call {
@@ -127,6 +131,28 @@ impl ToolInspector for OriginInspector {
                         "Tool exempted from origin validation"
                     );
                     continue;
+                }
+
+                // Check if tool is in the allowlist for this window
+                if state.is_tool_allowed(&tool_call.name) {
+                    tracing::debug!(
+                        tool_name = %tool_call.name,
+                        tool_request_id = %request.id,
+                        "Tool in allowlist for this window, skipping validation"
+                    );
+                    continue;
+                }
+
+                // Check if this is a retry of the last tool (retry logic)
+                if let Some(last_tool) = state.last_invoked_tool() {
+                    if last_tool == &tool_call.name {
+                        tracing::debug!(
+                            tool_name = %tool_call.name,
+                            tool_request_id = %request.id,
+                            "Tool is same as last invoked (retry), allowing without prompt"
+                        );
+                        continue;
+                    }
                 }
 
                 // We're in a tool-call window, this is a cross-origin request
@@ -319,5 +345,93 @@ mod tests {
         assert_eq!(state.tools_invoked_this_turn.len(), 2);
         assert!(state.tools_invoked_this_turn.contains(&"tool1".to_string()));
         assert!(state.tools_invoked_this_turn.contains(&"tool2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_allowlist_prevents_repeated_prompts() {
+        let window_state = Arc::new(Mutex::new(ToolCallWindowState::new()));
+
+        // Set window state to in_window
+        {
+            let mut state = window_state.lock().await;
+            state.enter_tool_call_window();
+            state.add_invoked_tool("read_file".to_string());
+            // Add write_file to allowlist (simulating previous approval)
+            state.allow_tool("write_file".to_string());
+        }
+
+        let inspector = OriginInspector::new(window_state.clone());
+
+        let tool_request = ToolRequest {
+            id: "req_1".to_string(),
+            tool_call: Ok(CallToolRequestParam {
+                name: "write_file".into(),
+                arguments: Some(object!({})),
+            }),
+            metadata: None,
+            tool_meta: None,
+        };
+
+        let results = inspector
+            .inspect(&[tool_request], &[])
+            .await
+            .unwrap();
+
+        // Should be in allowlist, no prompt needed
+        assert_eq!(results.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_retry_logic_allows_same_tool() {
+        let window_state = Arc::new(Mutex::new(ToolCallWindowState::new()));
+
+        // Set window state with write_file as the last invoked tool
+        {
+            let mut state = window_state.lock().await;
+            state.enter_tool_call_window();
+            state.add_invoked_tool("read_file".to_string());
+            state.add_invoked_tool("write_file".to_string());
+        }
+
+        let inspector = OriginInspector::new(window_state.clone());
+
+        // Try to call write_file again (retry)
+        let tool_request = ToolRequest {
+            id: "req_1".to_string(),
+            tool_call: Ok(CallToolRequestParam {
+                name: "write_file".into(),
+                arguments: Some(object!({})),
+            }),
+            metadata: None,
+            tool_meta: None,
+        };
+
+        let results = inspector
+            .inspect(&[tool_request], &[])
+            .await
+            .unwrap();
+
+        // Should be allowed as retry, no prompt needed
+        assert_eq!(results.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_allowlist_cleared_on_user_turn_reset() {
+        let mut state = ToolCallWindowState::new();
+
+        state.enter_tool_call_window();
+        state.allow_tool("write_file".to_string());
+        state.add_invoked_tool("read_file".to_string());
+
+        assert!(state.is_tool_allowed("write_file"));
+        assert_eq!(state.tools_invoked_this_turn.len(), 1);
+
+        // Reset for new user turn
+        state.reset_for_user_turn();
+
+        // Allowlist should be cleared
+        assert!(!state.is_tool_allowed("write_file"));
+        assert_eq!(state.tools_invoked_this_turn.len(), 0);
+        assert!(!state.in_window);
     }
 }

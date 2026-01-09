@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -73,6 +74,10 @@ pub struct ToolCallWindowState {
 
     /// Timestamp of last user message (for logging/debugging)
     pub last_user_message_time: Option<std::time::Instant>,
+
+    /// ccarpene-blk test edits
+    /// AllowList for tools this window
+    pub allowed_tools: HashSet<String>,
 }
 
 impl ToolCallWindowState {
@@ -81,12 +86,14 @@ impl ToolCallWindowState {
             in_window: false,
             tools_invoked_this_turn: Vec::new(),
             last_user_message_time: None,
+            allowed_tools: HashSet::new(),
         }
     }
 
     pub fn reset_for_user_turn(&mut self) {
         self.in_window = false;
         self.tools_invoked_this_turn.clear();
+        self.allowed_tools.clear(); // Clear allowlist for new user turn
         self.last_user_message_time = Some(std::time::Instant::now());
     }
 
@@ -98,6 +105,22 @@ impl ToolCallWindowState {
         if !self.tools_invoked_this_turn.contains(&tool_name) {
             self.tools_invoked_this_turn.push(tool_name);
         }
+    }
+
+    /// Add a tool to the allowlist for this tool window
+    /// Once allowed, it won't require approval again in this window
+    pub fn allow_tool(&mut self, tool_name: String) {
+        self.allowed_tools.insert(tool_name);
+    }
+
+    /// Check if a tool is in the allowlist for this window
+    pub fn is_tool_allowed(&self, tool_name: &str) -> bool {
+        self.allowed_tools.contains(tool_name)
+    }
+
+    /// Get the last tool that was invoked (for retry logic)
+    pub fn last_invoked_tool(&self) -> Option<&String> {
+        self.tools_invoked_this_turn.last()
     }
 }
 

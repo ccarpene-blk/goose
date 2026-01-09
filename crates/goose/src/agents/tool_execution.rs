@@ -106,6 +106,17 @@ impl Agent {
                             // Track this request as approved so we don't yield its pre-created message later
                             approved_request_ids.lock().await.insert(request.id.clone());
 
+                            // Add tool to the allowlist for this tool window
+                            // This prevents repeated prompts for the same tool in the same window
+                            {
+                                let mut window_state = self.tool_call_window.lock().await;
+                                window_state.allow_tool(tool_call.name.to_string());
+                                tracing::debug!(
+                                    tool_name = %tool_call.name,
+                                    "Tool added to allowlist for current window"
+                                );
+                            }
+
                             // Create the tool future and add it to the shared tool_futures collection
                             // This allows it to be processed asynchronously after the approval stream completes
                             let (req_id, tool_result) = self.dispatch_tool_call(
